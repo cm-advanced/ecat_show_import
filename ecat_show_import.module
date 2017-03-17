@@ -1,0 +1,163 @@
+<?php
+
+/**
+ * Implements hook_cronapi($op, $job = NULL).
+ */
+function ecat_show_import_cronapi($op, $job = NULL) {
+  $items = array();
+
+  $items['ecat_show_import_show_feed'] = array(
+    'description' => 'ECAT Show XML Feed',
+    'rule' => '0 */3 * * *',
+    'callback' => '_ecat_show_import_show_feed',
+    'weight' => 4,
+  );
+
+  return $items;
+}
+
+/**
+ * Callback function for cron item.
+ */
+function _ecat_show_import_show_feed() {
+  $data = ecat_show_import_get_xml_feed();
+
+  if ($data) {
+    foreach($data as $item) {
+      // Check if show exists
+      if (!$show_exists = ecat_show_import_show_node_exists($item['guid'])) {
+        // Create show
+        $show = ecat_show_import_create_cm_show_node($item);
+
+        if ($show) {
+          // Log success to watchdog.
+          watchdog(
+            $type = 'ecat_show_import',
+            $message = 'Success! Created show for GUID: %guid',
+            $variables = array('%guid' => $item['guid']),
+            $severity = WATCHDOG_INFO
+          );
+        }
+        else {
+          // Log failure to watchdog.
+          watchdog(
+            $type = 'ecat_show_import',
+            $message = 'Failure! Could not create show for GUID: %guid',
+            $variables = array('%guid' => $item['guid']),
+            $severity = WATCHDOG_ALERT
+          );
+        }
+      }
+      else {
+        // Log duplicate attempt.
+        watchdog(
+          $type = 'ecat_show_import',
+          $message = 'Show already exists for GUID: %guid',
+          $variables = array('%guid' => $item['guid']),
+          $severity = WATCHDOG_INFO
+        );
+      }
+    }
+  }
+}
+
+/**
+ * Helper function to get xml feed.
+ */
+function ecat_show_import_get_xml_feed() {
+  $url = 'http://cloudcast.telvue.com/api/mrss/v2/mrss/T01500.xml?recent=30';
+
+  // Init curl and pull in rss feed.
+  $curl = curl_init();
+  curl_setopt($curl, CURLOPT_RETURNTRANSFER, 1);
+  curl_setopt($curl, CURLOPT_URL, $url);
+  $xml = curl_exec($curl);
+  $channel = new SimpleXMLElement($xml);
+
+  foreach($channel->channel->item as $item) {
+    // Get data in cloudcast: namespace for cloudcast information
+    $cloudcast = $item->children('http://cloudcast.telvue.com/mrss_cloudcast/');
+
+    $data[] = array(
+      'guid' => (string) $item->{'link'},
+      'title' => (string) $cloudcast->summary,
+      'link' => (string) $item->{'link'},
+      //'description' => (string) $item->{'description'},
+      'pubDate' => (string) $item->{'pubDate'},
+    );
+  }
+
+  // Close curl
+  curl_close($curl);
+
+  return $data;
+}
+
+/**
+ * Helper function to check if 'show' node exists, based on GUID field.
+ */
+function ecat_show_import_show_node_exists($guid) {
+  $query = new EntityFieldQuery;
+  $query->entityCondition('entity_type', 'node')
+    ->propertyCondition('type', 'cm_show')
+    ->fieldCondition('field_cmb_show_guid', 'value', $guid, '=');
+  $result = $query->execute();
+
+  if (isset($result['node'])) {
+    $nid = array_keys($result['node']);
+    $nid = $nid[0];
+    return $nid;
+  }
+  else {
+    return FALSE;
+  }
+}
+
+/**
+ * Helper function to create Show Node.
+ */
+function ecat_show_import_create_cm_show_node($item) {
+  $node = new stdClass();
+  $node->title = $item['title'];
+  $node->type = 'cm_show';
+  node_object_prepare($node);
+  $node->language = LANGUAGE_NONE;
+  $node->uid = 1;
+  $node->status = 1;
+  $node->promote = 0;
+  $node->comment = 0;
+
+  // Create file
+  $embed_code = $item['link'];
+  // Generate thumbnail
+  $provider = media_internet_get_provider($embed_code);
+  $file = $provider->save();
+
+  // Add Fields
+  
+  // Show VOD
+  if ($file) {
+    $node->field_show_vod[LANGUAGE_NONE][] = array(
+      'fid' => $file->fid,
+      'display' => 1,
+      'description' => NULL,
+    );
+  }
+
+  // GUID
+  $node->field_cmb_show_guid[LANGUAGE_NONE][]['value'] = $item['guid'];
+
+  // Save node
+  $node = node_submit($node);
+  
+  // Return a TRUE or FALSE for node_save().
+  try {
+    node_save($node);
+    $success = TRUE;
+  }
+  catch (Exception $e) {
+    $success = FALSE;
+  }
+
+  return $success;
+}
